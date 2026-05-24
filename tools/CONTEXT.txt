@@ -1,0 +1,168 @@
+================================================================================
+PROJECT CONTEXT FOR AI ASSISTANTS
+================================================================================
+
+PURPOSE
+-------
+This script converts audio samples to PlayStation 1 (PS1) VAG format and back
+to MP3. It replicates what the tool "psxavenc" does, entirely in Python without
+opening any GUI applications. ffmpeg is used only as a command-line subprocess
+for audio loading and resampling.
+
+
+FOLDER STRUCTURE
+----------------
+psss/
+├── input/          ← place WAV files here before encoding
+├── output/         ← encoded VAG files appear here
+├── output_mp3/     ← decoded MP3 files appear here (VAG → MP3)
+├── tools/          ← this file lives here; place psxavenc binary here if needed
+└── convert.py      ← the main script
+
+
+HOW TO RUN
+----------
+  # WAV → VAG (default)
+  python3 convert.py                        # all WAVs in input/
+  python3 convert.py input/kick.wav         # single file
+  python3 convert.py -r 44100              # custom sample rate
+  python3 convert.py -l                    # mark as looping (full sample)
+  python3 convert.py -l --ls 5600 --le 11200  # loop a specific region
+
+  # VAG → MP3
+  python3 convert.py --decode              # all VAGs in output/
+  python3 convert.py --decode output/pad.vag
+
+  Requirements: pip install numpy && brew install ffmpeg
+
+
+================================================================================
+PS1 AUDIO FORMAT — TECHNICAL CONTEXT
+================================================================================
+
+BACKGROUND (from video tutorial transcript)
+-------------------------------------------
+- The PS1 SPU (Sound Processing Unit) chip natively plays at 44100 Hz.
+- Using 22050 Hz gives the characteristic PS1 "underground" aliasing sound.
+- The default sample rate in this script is 22050 Hz, matching the tutorial.
+
+PREPROCESSING PIPELINE (matches what the tutorial does manually in a DAW)
+--------------------------------------------------------------------------
+  1. Convert stereo → mono
+  2. Bit depth → 16-bit signed PCM
+  3. Resample to target rate (22050 Hz default), preserving pitch
+  All three steps are done by ffmpeg in one command (-ac 1 -ar RATE -f s16le).
+
+VAG FORMAT (Sony PS1 audio container)
+--------------------------------------
+  Header: 48 bytes, big-endian
+    Offset 0x00  4 bytes  Magic: "VAGp"
+    Offset 0x04  4 bytes  Version: 0x00000020
+    Offset 0x08  4 bytes  Reserved: 0
+    Offset 0x0C  4 bytes  ADPCM data size in bytes (includes terminator block)
+    Offset 0x10  4 bytes  Sample rate in Hz
+    Offset 0x14  12 bytes Padding zeros
+    Offset 0x20  16 bytes Name (ASCII, null-padded)
+  Total header: 48 bytes
+
+  Body: ADPCM blocks, each exactly 16 bytes
+    Byte 0:   (filter_index << 4) | shift   — header byte
+    Byte 1:   flags
+    Bytes 2–15: 14 bytes of packed 4-bit nibbles (28 samples per block)
+                nibble order: low nibble of each byte = sample[2i],
+                              high nibble             = sample[2i+1]
+
+  Terminating block: 0x00 0x07 followed by 14 zero bytes.
+
+SPU-ADPCM ENCODING ALGORITHM
+------------------------------
+  Each 16-byte block encodes exactly 28 PCM samples using ADPCM with a
+  prediction filter. The encoder tries all 65 combinations of:
+    - 5 prediction filters (indexed 0–4)
+    - 13 shift values (0–12)
+  and picks the combination with the lowest mean squared error.
+
+  Filter coefficients (f0, f1) — exact PS1 SPU values:
+    Index 0:  f0 =  0.0,       f1 =  0.0
+    Index 1:  f0 =  0.9375,    f1 =  0.0
+    Index 2:  f0 =  1.796875,  f1 = -0.8125
+    Index 3:  f0 =  1.53125,   f1 = -0.859375
+    Index 4:  f0 =  1.90625,   f1 = -0.9375
+
+  Per sample encoding:
+    predicted  = f0 * prev1 + f1 * prev2
+    residual   = pcm_sample - predicted
+    scale      = 1 << (12 - shift)
+    nibble     = clamp(round(residual / scale), -8, 7)   # 4-bit signed
+    decoded    = clamp(predicted + nibble * scale, -32768, 32767)
+    (decoded becomes prev1 for the next sample)
+
+  numpy is used to process all 65 (filter × shift) combinations in parallel
+  across the 28-sample dimension, making encoding fast.
+
+LOOP POINT CONSTRAINT (critical PS1 SPU hardware requirement)
+--------------------------------------------------------------
+  The PS1 SPU requires that loop start, loop end, AND loop length are ALL
+  multiples of 28 (one ADPCM block = 28 samples).
+  Valid values: 0, 28, 56, 84, 112, ...
+
+  Alignment formula (from the tutorial):
+    aligned = floor(raw_value / 28) * 28
+
+  The script does this automatically for --ls and --le arguments and prints
+  the aligned values so the user can verify.
+
+  Loop flags embedded in byte 1 of each block:
+    0x00  normal block
+    0x01  end of data (one-shot, no loop)
+    0x03  loop end — SPU jumps back to the last loop-start block
+    0x06  loop start — SPU remembers this position as the loop target
+    0x07  terminating silence block (always appended at the very end)
+
+VAG DECODING (for MP3 export)
+------------------------------
+  Reverses the encoding:
+    1. Read 48-byte header → get sample_rate
+    2. For each 16-byte block:
+       - Extract filter index and shift from byte 0
+       - For each nibble (low then high within each data byte):
+           sign-extend 4-bit to signed: val >= 8 → val - 16
+           decoded = clamp(nibble * (1 << (12-shift)) + f0*h1 + f1*h2, ...)
+           update history: h2 = h1, h1 = decoded
+       - Stop when flags byte has bit 0 set (end flag)
+    3. Pipe raw s16le PCM to ffmpeg → encode as MP3
+
+
+================================================================================
+WHAT TO KEEP IN MIND WHEN MODIFYING
+================================================================================
+
+1. BLOCK SIZE IS ALWAYS 28 SAMPLES — never change SAMPLES_PER_BLOCK.
+   Any loop point, trim point, or padding must align to this boundary.
+
+2. THE 65-COMBO NUMPY ARRAYS (_FI, _SHIFT, _F0, _F1, _SCALE) are module-level
+   constants built at import time. If you add more filters or shift values,
+   update those arrays and the _encode_block loop accordingly.
+
+3. NIBBLE ORDER matters for compatibility with real PS1 hardware and emulators:
+   low nibble of byte[2+i] = sample[2i], high nibble = sample[2i+1].
+   Swapping these will produce garbled audio.
+
+4. VAG HEADER IS BIG-ENDIAN. All multi-byte fields use struct format ">".
+
+5. FILTER COEFFICIENTS are exact rational values derived from the PS1 hardware.
+   Do not approximate or change them.
+
+6. ffmpeg IS THE ONLY EXTERNAL DEPENDENCY beyond numpy. It is called as a
+   subprocess (no GUI). If replacing ffmpeg, ensure the replacement outputs
+   raw signed 16-bit little-endian PCM (-f s16le) or adjust the unpack call.
+
+7. LOOP FLAGS: a looping VAG does NOT get a 0x01 end flag on the last block.
+   The 0x03 flag on the loop-end block handles stopping + jumping. The 0x07
+   terminator is always appended after all content blocks regardless.
+
+8. SAMPLE RATE: 22050 Hz is the default matching the tutorial. The PS1 SPU
+   natively supports 44100 Hz — use -r 44100 if you want full fidelity with
+   no aliasing effect.
+
+

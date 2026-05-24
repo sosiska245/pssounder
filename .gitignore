@@ -1,0 +1,16 @@
+# Audio files — add your own to input/
+input/*.wav
+input/*.WAV
+
+# Generated output
+output/*.vag
+output_mp3/*.mp3
+
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
