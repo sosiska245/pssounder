@@ -1,4 +1,4 @@
-# psss — PS1 VAG audio converter
+# pssounder — PS1 VAG audio converter
 
 Pure Python WAV → VAG encoder and VAG → MP3 decoder for PlayStation 1 audio.
 Implements the full SPU-ADPCM algorithm entirely in Python (no external VAG tools needed).
@@ -55,13 +55,11 @@ python3 convert.py --decode output/kick.vag
 ## Folder structure
 
 ```
-psss/
+pssounder/
 ├── convert.py       # main script
 ├── input/           # place WAV files here
 ├── output/          # encoded .vag files appear here
-├── output_mp3/      # decoded .mp3 files appear here
-└── tools/
-    └── CONTEXT.txt  # PS1 VAG format technical reference
+└── output_mp3/      # decoded .mp3 files appear here
 ```
 
 ---
@@ -75,8 +73,3 @@ psss/
 
 The PS1 SPU natively runs at 44100 Hz. 22050 Hz gives the characteristic lo-fi texture used in many PS1 games.
 
----
-
-## Technical reference
-
-See `tools/CONTEXT.txt` for a full breakdown of the VAG format, ADPCM encoding algorithm, loop flag values, and hardware constraints.
